@@ -1,13 +1,14 @@
 import copy
 import json
 import os
-import logging
+#import logging
+from robot.api import logger
 import os
 from datetime import datetime
 from requests import Response
 from requests.sessions import Session
 
-logger = logging.getLogger(__name__)
+#logger = logging.getLogger(__name__)
 
 
 class ObjectNotFound(Exception):
@@ -117,7 +118,7 @@ class ApiSession(Session):
         try:
             user_session = ApiSession.sessionDict[username]["api"]
         except KeyError:
-            logger.debug("Session does not exist creating new session for %s",
+            logger.debug("Session does not exist creating new session for %s" %
                          username)
             self.authenticate_session()
             ApiSession.sessionDict[username] = \
@@ -154,7 +155,7 @@ class ApiSession(Session):
             if user_session.tenant != tenant:
                 raise APIError("Tenant doesn't match; use ApiSessionAdapter")
         except KeyError:
-            logger.debug("Session does not exist creating new session for %s",
+            logger.debug("Session does not exist creating new session for %s" %
                          username)
             user_session = ApiSession(controller_ip, username, password,
                                       token=token, tenant=tenant,
@@ -169,7 +170,7 @@ class ApiSession(Session):
         resets and re-authenticates the current session.
         :param api: ApiSession object
         """
-        logger.info('resetting session for %s', self.username)
+        logger.info('resetting session for %s' % self.username)
         self.headers = {}
         self.authenticate_session()
 
@@ -184,13 +185,13 @@ class ApiSession(Session):
         else:
             body["token"] = self.keystone_token
 
-        logger.debug('authenticating user %s ', self.username)
+        logger.debug('authenticating user %s ' % self.username)
         rsp = super(ApiSession, self).post(self.prefix+"/login", body,
                                            timeout=60)
         if rsp.status_code != 200:
             raise Exception("Authentication failed: code %d: msg: %s",
                             rsp.status_code, rsp.text)
-        logger.debug("rsp cookies: %s", dict(rsp.cookies))
+        logger.debug("rsp cookies: %s" % dict(rsp.cookies))
         self.headers.update({
             "Referer": self.prefix,
             "Content-Type": "application/json"
@@ -202,8 +203,8 @@ class ApiSession(Session):
                 cached_api = \
                     ApiSession.sessionDict[self.username]['api']
                 cached_api.headers.update({"X-CSRFToken": csrftoken})
-        logger.debug("authentication success for user %s with headers: %s",
-                     self.username, self.headers)
+        logger.debug("authentication success for user %s with headers: %s" %
+                     (self.username, self.headers))
         return
 
     def _get_api_headers(self, tenant, tenant_uuid, timeout, headers):
@@ -245,8 +246,8 @@ class ApiSession(Session):
             headers.
         """
         if self.pid != os.getpid():
-            logger.info('pid %d change detected new %d. Closing session',
-                        self.pid, os.getpid())
+            logger.info('pid %d change detected new %d. Closing session' %
+                        (self.pid, os.getpid()))
             self.close()
             self.pid = os.getpid()
         fullpath = self._get_api_path(path)
@@ -257,10 +258,10 @@ class ApiSession(Session):
             resp = fn(fullpath, json=data, headers=api_hdrs, **kwargs)
         else:
             resp = fn(fullpath, data=data, headers=api_hdrs, **kwargs)
-        logger.debug('kwargs: %s rsp %s', kwargs, resp.text)
+        logger.debug('kwargs: %s rsp %s' % (kwargs, resp.text))
         if resp.status_code in (401, 419):
-            logger.info('received error %d %s so resetting connection',
-                        resp.status_code, resp.text)
+            logger.info('received error %d %s so resetting connection' %
+                        (resp.status_code, resp.text))
             ApiSession.reset_session(self)
             self.num_session_retries += 1
             if self.num_session_retries > 2:
@@ -496,11 +497,11 @@ class ApiSession(Session):
     def _clean_inactive_sessions():
         """Removes sessions which are inactive more than 20 min"""
         session_cache = ApiSession.sessionDict
-        logger.debug("cleaning inactive sessions in pid %d num elem %d",
-                     os.getpid(), len(session_cache))
+        logger.debug("cleaning inactive sessions in pid %d num elem %d" %
+                     (os.getpid(), len(session_cache)))
         for user, session in session_cache.iteritems():
             tdiff = (datetime.utcnow() - session["last_used"]).total_seconds()
             if tdiff < ApiSession.SESSION_CACHE_EXPIRY:
                 continue
-            logger.debug("Removed session for : %s", user)
+            logger.debug("Removed session for : %s" % user)
             del session_cache[user]
