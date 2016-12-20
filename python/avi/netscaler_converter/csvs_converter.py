@@ -41,6 +41,7 @@ class CsvsConverter(object):
         avi_config['HTTPPolicySet'] = []
         rule_index = 0
         for cs_vs_index, key in enumerate(cs_vs_conf):
+            #print key
             LOG.debug("Context Switch VS conversion started for: %s" % key)
             lbvs_bindings = []
             cs_vs = cs_vs_conf[key]
