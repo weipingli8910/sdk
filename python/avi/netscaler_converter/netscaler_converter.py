@@ -42,6 +42,8 @@ if __name__ == "__main__":
                         default='avi123')
     parser.add_argument('-t', '--tenant', help='tenant name for auto upload',
                         default='admin')
+    parser.add_argument('--cloud_name', help='cloud name for auto upload',
+                        default='Default-Cloud')
     parser.add_argument('-c', '--controller_ip',
                         help='controller ip for auto upload')
     parser.add_argument('-s', '--vs_state', choices=['enable', 'disable'],
@@ -58,6 +60,7 @@ if __name__ == "__main__":
                              'authentication')
 
     args = parser.parse_args()
+
     if not os.path.exists(args.output_file_path):
         os.mkdir(args.output_file_path)
     init_logger_path(args.output_file_path)
@@ -75,6 +78,8 @@ if __name__ == "__main__":
             os.makedirs(output_dir)
         is_download_from_host = True
 
+    # LOG.info('Avi Build version : %s' % AVI_VERSION)
+    # LOG.info('Avi pip version : %s' % AVI_PIP_VERSION)
     if is_download_from_host:
         LOG.debug("Copying files from host")
         scp_util.get_files_from_ns(input_dir, args.ns_host_ip,
@@ -86,8 +91,10 @@ if __name__ == "__main__":
 
     ns_config, skipped_cmds = ns_parser.get_ns_conf_dict(source_file)
     avi_config = ns_conf_converter.convert(ns_config, args.tenant,
+                                           args.cloud_name,
                                            args.controller_version, output_dir,
-                                           input_dir, skipped_cmds, args.vs_state)
+                                           input_dir, skipped_cmds,
+                                           args.vs_state)
 
     if args.option == "cli-upload":
         text_file = open(output_dir + os.path.sep + "Output.json", "w")

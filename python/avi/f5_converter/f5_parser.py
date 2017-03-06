@@ -71,10 +71,14 @@ def generate_grammar_v10():
     v_addr_kw = Keyword("virtual address")
     ip_forward_kw = Keyword("ip forward")
     l2_forward_kw = Keyword("l2 forward")
+    is_ro_kw = Keyword('is read only')
     cookie_mode_kw = Keyword("cookie mode")
+    defaults_from_kw = Keyword('defaults from')
     ct_include_kw = Keyword("compress content type include")
     ct_exclude_kw = Keyword("compress content type exclude")
     empty_object = Keyword("{ }")
+
+    disable_kw = Keyword('disable')
 
     common = Suppress("/Common/")
     comment = Suppress("#") + Suppress(restOfLine)
@@ -83,6 +87,8 @@ def generate_grammar_v10():
     EOL = LineEnd().suppress()
     SOL = LineStart().suppress()
     reserved_words = (ltm | apm | auth | net | sys).suppress()
+
+    sw_key = (disable_kw)
 
     ignore = (common | comment)
 
@@ -93,21 +99,22 @@ def generate_grammar_v10():
     key_exceptions = (opt_kw | profiles_kw | monitor_kw | session_kw | mode_kw |
                       lb_method_kw | ip_forward_kw | l2_forward_kw |
                       ct_include_kw | ct_exclude_kw | members_kw |
-                      cookie_mode_kw)
+                      cookie_mode_kw | is_ro_kw)
 
     # define structures
     value = Forward()
     value_object = Forward()
     multi_word_key = originalTextFor(OneOrMore((~key_exceptions)+data+(~EOL)))
-    property_name = (data+EOL | key_exceptions | multi_word_key)
-    f5_property = dictOf(property_name, Optional(value, default=None))
-    properties = Dict(f5_property)
+    property_name = (multi_word_key | key_exceptions | data+(~EOL))
+    dict_kv = (property_name + Optional(value, default=None))
+    dict_sv = (data+EOL + Empty())
+    f5_property = Dict(ZeroOrMore(Group(dict_kv | dict_sv)))
     entity_details = (originalTextFor(ZeroOrMore(unquoted_string)))
     entity = Group(entity_type+Group(
         entity_details + LBRACE + (f5_property | BS) + RBRACE))
     entities = OneOrMore(entity)
 
-    value_object << ((LBRACE + properties + RBRACE) | empty_object)
+    value_object << ((LBRACE + f5_property + RBRACE) | empty_object)
     value << (value_object | originalTextFor(data + restOfLine + (~LBRACE_KW)) |
               data)
 
@@ -132,6 +139,7 @@ def parse_config(source_str, version=11):
                                 "str_end": "..."+source_str[start-10:start]}
                 skipped_list.append(skipped_info)
         last_end = end
+
     for skipped in skipped_list:
         LOG.warn("Skipped for parse unmatched from offset:%s to offset:%s" %
                  (skipped["start"], skipped["end"]))
@@ -186,3 +194,5 @@ def convert_to_dict(result):
                     else:
                         result_dict[key] = dict_val
     return result_dict
+
+

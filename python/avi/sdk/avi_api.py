@@ -1,11 +1,11 @@
 import os
+import sys
 import copy
 import json
 import logging
 from datetime import datetime, timedelta
 from requests import Response
 from requests.sessions import Session
-import sys
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,28 @@ def avi_timedelta(td):
     else:
         ts = td.seconds + (24 * 3600 * td.days)
     return ts
+
+
+def avi_sdk_syslog_logger(logger_name='avi.sdk'):
+    # The following sets up syslog module to log underlying avi SDK messages
+    # based on the environment variables:
+    #   AVI_LOG_HANDLER: names the logging handler to use. Only syslog is
+    #     supported.
+    #   AVI_LOG_LEVEL: Logging level used for the avi SDK. Default is DEBUG
+    #   AVI_SYSLOG_ADDRESS: Destination address for the syslog handler.
+    #   Default is /dev/log
+    from logging.handlers import SysLogHandler
+    lf = '[%(asctime)s] %(levelname)s [' \
+                        '%(module)s.%(funcName)s:%(lineno)d] %(message)s'
+    log = logging.getLogger(logger_name)
+    log_level = os.environ.get('AVI_LOG_LEVEL', 'DEBUG')
+    if log_level:
+        log.setLevel(getattr(logging, log_level))
+    formatter = logging.Formatter(lf)
+    sh = SysLogHandler(address=os.environ.get('AVI_SYSLOG_ADDRESS', '/dev/log'))
+    sh.setFormatter(formatter)
+    log.addHandler(sh)
+    return log
 
 
 class ObjectNotFound(Exception):
@@ -112,11 +134,24 @@ class ApiSession(Session):
     SHARED_USER_HDRS = ['X-CSRFToken', 'Session-Id']
 
     def __init__(self, controller_ip, username, password=None, token=None,
-                 tenant=None, tenant_uuid=None, verify=False, port=None):
+                 tenant=None, tenant_uuid=None, verify=False, port=None,
+                 timeout=None):
         """
         initialize new session object with authenticated token from login api.
         It also keeps a cache of user sessions that are cleaned up if inactive
         for more than 20 mins.
+
+        Notes:
+        01. If mode is https and port is none or 443, we don't embed the
+            port in the prefix. The prefix would be 'https://ip'. If port
+            is a non-default value then we concatenate https://ip:port
+            in the prefix.
+        02. If mode is http and the port is none or 80, we don't embed the
+            port in the prefix. The prefix would be 'http://ip'. If port is
+            a non-default value, then we concatenate http://ip:port in
+            the prefix.
+        03. If the timeout value is None, then default the value to 60. 
+            Otherwise, use the passed value.
         """
         super(ApiSession, self).__init__()
         self.controller_ip = controller_ip
@@ -126,12 +161,26 @@ class ApiSession(Session):
         self.tenant_uuid = tenant_uuid
         self.tenant = tenant if tenant else "admin"
         self.headers = {}
-        self.prefix = (controller_ip if controller_ip.startswith('http')
-                       else "https://%s" % controller_ip)
         self.verify = verify
         self.port = port
         self.key = controller_ip + ":" + username
 
+        # Refer Notes 01 and 02
+        if controller_ip.startswith('http'):
+            if port is None or port == 80:
+                self.prefix = controller_ip
+            else:
+                self.prefix = '{x}:{y}'.format(x=controller_ip, y=port)
+        else:
+            if port is None or port == 443:
+                self.prefix = 'https://{x}'.format(x=controller_ip)
+            else:
+                self.prefix = 'https://{x}:{y}'.format(x=controller_ip, y=port)
+
+        # Refer Notes 03
+        self.timeout = timeout
+        if timeout is None:
+            self.timeout = 60
         try:
             user_session = ApiSession.sessionDict[self.key]["api"]
         except KeyError:
@@ -154,7 +203,8 @@ class ApiSession(Session):
 
     @staticmethod
     def get_session(controller_ip, username, password=None, token=None,
-                    tenant=None, tenant_uuid=None, verify=False, port=None):
+                    tenant=None, tenant_uuid=None, verify=False, port=None,
+                    timeout=None):
         """
         returns the session object for same user and tenant
         calls init if session dose not exist and adds it to session cache
@@ -165,6 +215,7 @@ class ApiSession(Session):
         :param tenant: Name of the tenant on Avi Controller
         :param tenant_uuid: Don't specify tenant when using tenant_id
         :param port: Rest-API may use a different port other than 443
+        :param timeout: timeout for API calls; Default value is 60 seconds
         """
         key = controller_ip + ":" + username
         try:
@@ -186,7 +237,7 @@ class ApiSession(Session):
             user_session = ApiSession(controller_ip, username, password,
                                       token=token, tenant=tenant,
                                       tenant_uuid=tenant_uuid, verify=verify,
-                                      port=port)
+                                      port=port, timeout=timeout)
             ApiSession.sessionDict[key] = \
                 {"api": user_session, "last_used": datetime.utcnow()}
         ApiSession._clean_inactive_sessions()
@@ -214,10 +265,11 @@ class ApiSession(Session):
 
         logger.debug('authenticating user %s ', self.username)
         rsp = super(ApiSession, self).post(self.prefix+"/login", body,
-                                           timeout=60)
+                                           timeout=self.timeout)
         if rsp.status_code != 200:
-            raise Exception("Authentication failed: code %d: msg: %s",
-                            rsp.status_code, rsp.text)
+            raise Exception(
+                "Authentication failed with code %d reason msg: %s" %
+                (rsp.status_code, rsp.text))
         logger.debug("rsp cookies: %s", dict(rsp.cookies))
         self.headers.update({
             "Referer": self.prefix,
@@ -259,7 +311,7 @@ class ApiSession(Session):
         return api_hdrs
 
     def _api(self, api_name, path, tenant, tenant_uuid, data=None,
-             headers=None, timeout=60, **kwargs):
+             headers=None, timeout=None, **kwargs):
         """
         It calls the requests.Session APIs and handles session expiry
         and other situations where session needs to be reset.
@@ -268,7 +320,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param headers: dictionary of headers that override the session
             headers.
         """
@@ -277,16 +329,21 @@ class ApiSession(Session):
                         self.pid, os.getpid())
             self.close()
             self.pid = os.getpid()
+        if timeout is None:
+            timeout = self.timeout
         fullpath = self._get_api_path(path)
         fn = getattr(super(ApiSession, self), api_name)
         api_hdrs = \
             self._get_api_headers(tenant, tenant_uuid, timeout, headers)
         if (data is not None) and (type(data) == dict):
             resp = fn(fullpath, data=json.dumps(data), headers=api_hdrs,
-                      **kwargs)
+                      timeout=timeout, **kwargs)
         else:
-            resp = fn(fullpath, data=data, headers=api_hdrs, **kwargs)
-        logger.debug('kwargs: %s rsp %s', kwargs, resp.text)
+            resp = fn(fullpath, data=data, headers=api_hdrs, 
+                      timeout=timeout, **kwargs)
+        logger.debug(
+            'path: %s http_method: %s headers: %s params: %s data: %s rsp: %s',
+            fullpath, api_name.upper(), api_hdrs, kwargs, data, resp.text)
         if resp.status_code in (401, 419):
             logger.info('received error %d %s so resetting connection',
                         resp.status_code, resp.text)
@@ -297,7 +354,7 @@ class ApiSession(Session):
                                self.num_session_retries)
             # should restore the updated_hdrs to one passed down
             resp = self._api(api_name, path, tenant, tenant_uuid, data,
-                             headers=headers, **kwargs)
+                             headers=headers, timeout=timeout, **kwargs)
             self.num_session_retries = 0
         if resp.cookies and 'csrftoken' in resp.cookies:
             csrftoken = resp.cookies['csrftoken']
@@ -305,7 +362,7 @@ class ApiSession(Session):
         self._update_session_last_used()
         return ApiResponse.to_avi_response(resp)
 
-    def get(self, path, tenant='', tenant_uuid='', timeout=60, params=None,
+    def get(self, path, tenant='', tenant_uuid='', timeout=None, params=None,
             **kwargs):
         """
         It extends the Session Library interface to add AVI API prefixes,
@@ -315,7 +372,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         get method takes relative path to service and kwargs as per Session
@@ -326,7 +383,7 @@ class ApiSession(Session):
                          params=params, **kwargs)
 
     def get_object_by_name(self, path, name, tenant='', tenant_uuid='',
-                           timeout=60, params=None, **kwargs):
+                           timeout=None, params=None, **kwargs):
         """
         Helper function to access Avi REST Objects using object
         type and name. It behaves like python dictionary interface where it
@@ -337,7 +394,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns dictionary object if successful else None
@@ -362,7 +419,7 @@ class ApiSession(Session):
         self._update_session_last_used()
         return obj
 
-    def post(self, path, data=None, tenant='', tenant_uuid='', timeout=60,
+    def post(self, path, data=None, tenant='', tenant_uuid='', timeout=None,
              force_uuid=None, params=None, **kwargs):
         """
         It extends the Session Library interface to add AVI API prefixes,
@@ -375,7 +432,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns session's response object
@@ -388,7 +445,7 @@ class ApiSession(Session):
                          timeout=timeout, params=params, **kwargs)
 
     def put(self, path, data=None, tenant='', tenant_uuid='',
-            timeout=60, params=None, **kwargs):
+            timeout=None, params=None, **kwargs):
         """
         It extends the Session Library interface to add AVI API prefixes,
         handle session exceptions related to authentication and update
@@ -400,7 +457,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns session's response object
@@ -409,7 +466,7 @@ class ApiSession(Session):
                          timeout=timeout, params=params, **kwargs)
 
     def patch(self, path, data=None, tenant='', tenant_uuid='',
-              timeout=60, params=None, **kwargs):
+              timeout=None, params=None, **kwargs):
         """
         It extends the Session Library interface to add AVI API prefixes,
         handle session exceptions related to authentication and update
@@ -421,7 +478,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns session's response object
@@ -430,7 +487,7 @@ class ApiSession(Session):
                          timeout=timeout, params=params, **kwargs)
 
     def put_by_name(self, path, name, data=None, tenant='',
-                    tenant_uuid='', timeout=60, params=None, **kwargs):
+                    tenant_uuid='', timeout=None, params=None, **kwargs):
         """
         Helper function to perform HTTP PUT on Avi REST Objects using object
         type and name.
@@ -442,17 +499,17 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns session's response object
         """
-        uuid = self._get_uuid_by_name(path, name)
+        uuid = self._get_uuid_by_name(path, name, tenant, tenant_uuid)
         path = '%s/%s' % (path, uuid)
         return self.put(path, data, tenant, tenant_uuid, timeout=timeout,
                         params=params, **kwargs)
 
-    def delete(self, path, tenant='', tenant_uuid='', timeout=60, params=None,
+    def delete(self, path, tenant='', tenant_uuid='', timeout=None, params=None,
                data=None, **kwargs):
         """
         It extends the Session Library interface to add AVI API prefixes,
@@ -463,7 +520,7 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         :param data: dictionary of the data. Support for json string
@@ -473,7 +530,7 @@ class ApiSession(Session):
         return self._api('delete', path, tenant, tenant_uuid, data=data,
                          timeout=timeout, params=params, **kwargs)
 
-    def delete_by_name(self, path, name, tenant='', tenant_uuid='', timeout=60,
+    def delete_by_name(self, path, name, tenant='', tenant_uuid='', timeout=None,
                        params=None, **kwargs):
         """
         Helper function to perform HTTP DELETE on Avi REST Objects using object
@@ -484,14 +541,14 @@ class ApiSession(Session):
         :param tenant: overrides the tenant used during session creation
         :param tenant_uuid: overrides the tenant or tenant_uuid during session
             creation
-        :param timeout: timeout for API calls
+        :param timeout: timeout for API calls; Default value is 60 seconds
         :param params: dictionary of key value pairs to be sent as query
             parameters
         returns session's response object
         """
         uuid = self._get_uuid_by_name(path, name, tenant, tenant_uuid)
         if not uuid:
-            raise ObjectNotFound
+            raise ObjectNotFound("%s/?name=%s" % (path, name))
         path = '%s/%s' % (path, uuid)
         return self.delete(path, tenant, tenant_uuid, timeout=timeout,
                            params=params, **kwargs)
@@ -514,7 +571,7 @@ class ApiSession(Session):
     def get_obj_uuid(self, obj):
         """returns uuid from dict object"""
         if not obj:
-           return None
+            raise ObjectNotFound()
         if isinstance(obj, Response):
             obj = json.loads(obj.text)
         if obj.get(0, None):
@@ -529,20 +586,13 @@ class ApiSession(Session):
     def _get_api_path(self, path, uuid=None):
         """
         This function returns the full url from relative path and uuid.
-        If there is a configured port (ex: Rest API port may be something
-        other than 443), then it is included in the path.
         """
-        if self.port is not None:
-            prefix = '{x}:{y}'.format(x=self.prefix, y=self.port)
-        else:
-            prefix = self.prefix
-
         if uuid:
-            return prefix+'/api/'+path+'/'+uuid
+            return self.prefix+'/api/'+path+'/'+uuid
         else:
-            return prefix+'/api/'+path
+            return self.prefix+'/api/'+path
 
-    def _get_uuid_by_name(self, path, name, tenant, tenant_uuid):
+    def _get_uuid_by_name(self, path, name, tenant='admin', tenant_uuid=''):
         """gets object by name and service path and returns uuid"""
         resp = self.get_object_by_name(path, name, tenant, tenant_uuid)
         if not resp:
