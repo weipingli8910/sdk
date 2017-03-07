@@ -8,18 +8,20 @@ This module provides a utility to rename objects and update attributes
 in an exported Avi configuration Output.json
 
 
-input:
-  obj_type: [
-     'obj_name':
-        name: new_name
-        cloud: aws_cloud
-    ]
+Eg.
+Pool:
+  - match_name: my-pool
+    patch:
+      name: grastogi
+      cloud: AWS
 
 '''
 import argparse
 import json
 import logging
 import sys
+import traceback
+
 import yaml
 import re
 from copy import deepcopy
@@ -40,6 +42,23 @@ class ConfigPatch(object):
         log.debug('input patch %s', patches)
         self.avi_cfg = avi_cfg
         self.patches = patches
+
+    def param_value_in_ref(self, avi_ref, param_name):
+        """
+
+        :param avi_ref:
+        :param param_name:
+        :return:
+        """
+        qp = avi_ref.split('?')[1]
+        params = qp.split('&')
+        for param in params:
+            k, v = param.split('=')
+            if k == param_name:
+                return v
+        log.error('returning param %s %s', avi_ref, param_name)
+        raise Exception('Could not find param %s in ref %s' %
+                        (param_name, avi_ref))
 
     def update_obj_refs(self, old_obj_type, old_ref, new_ref, obj):
         """
@@ -101,26 +120,35 @@ class ConfigPatch(object):
         :param avi_cfg:
         :return:
         """
-
         old_obj_refs = []
 
         # TODO(grastogi): The refs computation needs to change
         # as the currently the ref does not have tenant or
         # cloud information.
         tenant_ref = obj.get('tenant_ref', '/api/tenant/?name=admin')
-        tenant = tenant_ref.split('/api/tenant/?name=')[1]
-        obj_name = obj['name']
-        old_obj_ref = '%s:%s' % (tenant, obj['name'])
-        old_obj_refs.append(old_obj_ref)
-        old_obj_ref = obj['name']
-        old_obj_refs.append(old_obj_ref)
-        old_obj_ref = '/api/%s/?name=%s&tenant=%s' % (
-            obj_type.lower(), obj['name'], tenant)
-        old_obj_refs.append(old_obj_ref)
+        tenant = self.param_value_in_ref(tenant_ref, 'name')
+        if 'name' in obj:
+            obj_name = obj['name']
+            old_obj_ref = '%s:%s' % (tenant, obj['name'])
+            old_obj_refs.append(old_obj_ref)
+            old_obj_ref = obj['name']
+            old_obj_refs.append(old_obj_ref)
+            old_obj_ref = '/api/%s/?tenant=%s&name=%s' % (
+                obj_type.lower(), tenant, obj['name'])
+
+            cloud = (self.param_value_in_ref(obj.get('cloud_ref'), 'name')
+                     if 'cloud_ref' in obj else '')
+            if cloud:
+                old_obj_ref = '%s&cloud=%s' % (old_obj_ref, cloud)
+
+            old_obj_refs.append(old_obj_ref)
+        log.debug('patching %s:%s with patch %s',
+                  obj_type, obj.get('name', ''), patch_data)
         obj.update(patch_data['patch'])
-        new_obj_ref = '%s:%s' % (obj.get('tenant', 'admin'), obj['name'])
-        new_obj_name = obj['name']
-        if ('name' in patch_data['patch']) and (obj_name != new_obj_name):
+        if 'name' in obj:
+            new_obj_name = obj['name']
+        if (('name' in patch_data['patch']) and old_obj_refs and
+                (obj_name != new_obj_name)):
             # need to update all the references for this object
             new_obj_ref = '/api/%s/?tenant=%s&name=%s' % (
                 obj_type.lower(), tenant, obj['name'])
@@ -158,7 +186,13 @@ class ConfigPatch(object):
                 regex_pattern = patch_data['match_name_regex']
             rexp = re.compile(regex_pattern)
             if rexp.match(obj_name):
-                self.apply_obj_patch(obj_type, obj, patch_data, new_cfg)
+                try:
+                    self.apply_obj_patch(obj_type, obj, patch_data, new_cfg)
+                except:
+                    log.error('failure in object %s patch %s', obj, patch_data)
+                    log.error(traceback.format_exc())
+
+                    raise
         return new_cfg
 
     def patch(self):
@@ -186,7 +220,21 @@ if __name__ == '__main__':
     ch.setFormatter(formatter)
     root_logger.addHandler(ch)
 
-    parser = argparse.ArgumentParser(description='Patches an exported Avi Configuration with a configuration patch input as yaml file.')
+    parser = argparse.ArgumentParser(
+        description='Patches an exported Avi Configuration with a configuration patch input as yaml file.',
+        usage="""
+    python config_patch -c avi_config.json -p test/patch.yml
+    output: avi_config.json.patched
+    Contents of the patch.yml
+    Pool:
+      - match_name: cool
+        patch:
+          name: awesome
+    VirtualService:
+      - match_name: cool
+        patch:
+          name: awesome
+        """)
     parser.add_argument('-c', '--aviconfig',
                         help='Avi configuration in JSON format')
     parser.add_argument('-p', '--patchconfig',

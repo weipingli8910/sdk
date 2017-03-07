@@ -27,7 +27,8 @@ class ProfileConfigConv(object):
               'AES256-SHA:DES-CBC3-SHA'
 
     def convert_profile(self, profile, key, f5_config, profile_config,
-                        avi_config, input_dir, user_ignore, tenant_ref, key_and_cert_mapping_list):
+                        avi_config, input_dir, user_ignore, tenant_ref,
+                        key_and_cert_mapping_list):
         pass
 
     def convert(self, f5_config, avi_config, input_dir, user_ignore, tenant_ref):
@@ -62,7 +63,8 @@ class ProfileConfigConv(object):
                     profile_type, profile, profile_config, name)
                 u_ignore = user_ignore.get('profile', {})
                 self.convert_profile(profile, key, f5_config, profile_config,
-                                     avi_config, input_dir, u_ignore, tenant_ref, key_and_cert_mapping_list)
+                                     avi_config, input_dir, u_ignore, tenant_ref,
+                                     key_and_cert_mapping_list)
                 LOG.debug("Conversion successful for profile: %s" % name)
             except:
                 LOG.error("Failed to convert profile: %s" % key, exc_info=True)
@@ -140,12 +142,12 @@ class ProfileConfigConv(object):
         if key and cert:
             cert = {"certificate": cert}
             ssl_kc_obj = {
-                    'name': name,
-                    'key': key,
-                    'certificate': cert,
-                    'key_passphrase': '',
-                    'type': 'SSL_CERTIFICATE_TYPE_VIRTUALSERVICE'
-                }
+                'name': name,
+                'key': key,
+                'certificate': cert,
+                'key_passphrase': '',
+                'type': 'SSL_CERTIFICATE_TYPE_VIRTUALSERVICE'
+            }
             if tenant:
                 ssl_kc_obj['tenant_ref'] = tenant
         if ssl_kc_obj:
@@ -157,6 +159,18 @@ class ProfileConfigConv(object):
             LOG.info('Added new SSL key and certificate for %s' % name)
         return ssl_kc_obj
 
+        if ssl_kc_obj:
+            cert_obj = {'key_file_name': key_file_name,
+                        'cert_file_name': cert_file_name,
+                        'name': name
+                        }
+            key_and_cert_mapping_list.append(cert_obj)
+            LOG.info('Added new SSL key and certificate for %s' % name)
+
+        if ssl_kc_obj:
+            conv_utils.update_skip_duplicates(
+                ssl_kc_obj, avi_config['SSLKeyAndCertificate'],
+                'key_cert', converted_objs, name, default_profile_name)
 
 class ProfileConfigConvV11(ProfileConfigConv):
     supported_types = ["client-ssl", "server-ssl", "http", "dns", "fasthttp",
@@ -244,7 +258,8 @@ class ProfileConfigConvV11(ProfileConfigConv):
     supported_oc = ['defaults-from', 'source-mask']
 
     def convert_profile(self, profile, key, f5_config, profile_config,
-                        avi_config, input_dir, user_ignore, tenant_ref, key_and_cert_mapping_list):
+                        avi_config, input_dir, user_ignore, tenant_ref,
+                        key_and_cert_mapping_list):
         skipped = profile.keys()
         indirect = []
         converted_objs = []
@@ -293,6 +308,10 @@ class ProfileConfigConvV11(ProfileConfigConv):
                 conv_utils.update_skip_duplicates(
                         key_cert_obj, avi_config['SSLKeyAndCertificate'],
                         'key_cert', converted_objs, name, default_profile_name)
+
+            parent_cls.update_key_cert_obj(name, key_file, cert_file, input_dir, tenant_ref,
+                                           avi_config, converted_objs, default_profile_name,
+                                           key_and_cert_mapping_list)
 
             # ciphers = profile.get('ciphers', 'DEFAULT')
             # ciphers = 'AES:3DES:RC4' if ciphers == 'DEFAULT' else ciphers
@@ -821,7 +840,13 @@ class ProfileConfigConvV10(ProfileConfigConv):
     supported_oc = ['defaults from', 'source mask']
 
     def convert_profile(self, profile, key, f5_config, profile_config,
+<<<<<<< .mine
                         avi_config, input_dir, user_ignore, tenant_ref, key_and_cert_mapping_list):
+
+=======
+                        avi_config, input_dir, user_ignore, tenant_ref,
+                        key_and_cert_mapping_list):
+>>>>>>> .theirs
         skipped = profile.keys()
         indirect = []
         converted_objs = []
